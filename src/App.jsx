@@ -9,7 +9,7 @@ import DonutChart from './components/DonutChart';
 import LineChart from './components/LineChart';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-const SKEY = 'akshay_tracker_v6';
+const SKEY = 'akshay_tracker_v7';
 const FF = "'Segoe UI', system-ui, sans-serif";
 const tabs = ['dashboard', 'days', 'goals', 'log'];
 
@@ -38,7 +38,7 @@ function saveS(s) {
 // ─── Initial State ────────────────────────────────────────────────────────────
 function initState() {
   const saved = loadS();
-  if (saved && saved.version === 6) return saved;
+  if (saved && saved.version === 7) return saved;
 
   const completed = {}, topicData = {};
   DAYS_DATA.forEach((_, i) => {
@@ -47,10 +47,11 @@ function initState() {
   });
 
   return {
-    version: 6,
+    version: 7,
     completed,
     topicData,
     logs: [],
+    timerSessions: [],
     todayHours: '',
     goals: [
       { id: 1, text: 'Interview-ready for BI/Analytics roles', done: false, phase: 0 },
@@ -165,6 +166,12 @@ function reducer(s, a) {
       n = { ...s, todayHours: a.val };
       break;
 
+    // Saves a completed timer session with full metadata
+    case 'SAVE_TIMER_SESSION': {
+      n = { ...s, timerSessions: [...(s.timerSessions || []), a.session] };
+      break;
+    }
+
     default:
       return s;
   }
@@ -172,6 +179,196 @@ function reducer(s, a) {
   // ✅ Save to localStorage on every user action (not on LOAD_DATA)
   saveS(n);
   return n;
+}
+
+// ─── InlineTimer Component ────────────────────────────────────────────────────
+// Sits in the tab bar — compact, always visible, never navigates away
+function InlineTimer({ dispatch, timerSessions }) {
+  const [status, setStatus]   = useState('idle');    // 'idle' | 'running' | 'paused'
+  const [elapsed, setElapsed] = useState(0);          // seconds
+  const [label, setLabel]     = useState('');
+  const [showLabel, setShowLabel] = useState(false);  // input popover
+  const intervalRef = useRef(null);
+  const sessionRef  = useRef(null);
+
+  // Tick
+  useEffect(() => {
+    if (status === 'running') {
+      intervalRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [status]);
+
+  const now = () => new Date().toISOString();
+
+  function fmt(sec) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  function doStart() {
+    const startedAt = now();
+    sessionRef.current = {
+      id: Date.now(),
+      label: label.trim() || 'Study session',
+      startedAt,
+      events: [{ type: 'start', at: startedAt }],
+    };
+    setElapsed(0);
+    setStatus('running');
+    setShowLabel(false);
+  }
+
+  function doPause() {
+    sessionRef.current.events.push({ type: 'pause', at: now(), elapsedSec: elapsed });
+    setStatus('paused');
+  }
+
+  function doResume() {
+    sessionRef.current.events.push({ type: 'resume', at: now(), elapsedSec: elapsed });
+    setStatus('running');
+  }
+
+  function doStop() {
+    const at = now();
+    sessionRef.current.events.push({ type: 'stop', at, elapsedSec: elapsed });
+    dispatch({
+      type: 'SAVE_TIMER_SESSION',
+      session: {
+        ...sessionRef.current,
+        stoppedAt: at,
+        totalSec: elapsed,
+        totalMin: +(elapsed / 60).toFixed(2),
+      }
+    });
+    setStatus('idle');
+    setElapsed(0);
+    setLabel('');
+    sessionRef.current = null;
+  }
+
+  const ringCol = status === 'running' ? '#5ef0c8' : status === 'paused' ? '#ffb347' : 'rgba(232,234,246,0.3)';
+
+  // Today's total from saved sessions
+  const todayTotal = (timerSessions || [])
+    .filter((s) => s.startedAt?.slice(0,10) === new Date().toISOString().slice(0,10))
+    .reduce((a, s) => a + (s.totalSec || 0), 0);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+
+      {/* Clock display */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 7,
+        background: 'rgba(0,0,0,0.2)', borderRadius: 12,
+        padding: '5px 12px', border: `1px solid ${ringCol}44`,
+        transition: 'border-color 0.3s',
+        flexShrink: 0,
+      }}>
+        {/* Pulse dot */}
+        <div style={{
+          width: 7, height: 7, borderRadius: '50%',
+          background: ringCol,
+          transition: 'background 0.3s',
+          animation: status === 'running' ? 'timerPulse 1.2s ease-in-out infinite' : 'none',
+          flexShrink: 0,
+        }} />
+        <span style={{
+          fontSize: 16, fontWeight: 700, color: ringCol,
+          fontVariantNumeric: 'tabular-nums', letterSpacing: 1,
+          transition: 'color 0.3s', minWidth: 52,
+        }}>
+          {fmt(elapsed)}
+        </span>
+      </div>
+
+      {/* Controls */}
+      {status === 'idle' && (
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={() => setShowLabel((v) => !v)}
+            style={iBtn('#5ef0c8')}>
+            ▶ Start
+          </button>
+          {/* Label popover */}
+          {showLabel && (
+            <div style={{
+              position: 'absolute', top: 38, left: 0, zIndex: 99,
+              background: '#1a1a2e', border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 12, padding: 10, width: 210,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            }}>
+              <input
+                autoFocus
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && doStart()}
+                placeholder="Session label (optional)"
+                style={{
+                  width: '100%', padding: '7px 10px', borderRadius: 8, marginBottom: 8,
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  background: 'rgba(255,255,255,0.07)', color: '#e8eaf6',
+                  fontSize: 12, fontFamily: FF, outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+              <button onClick={doStart} style={{ ...iBtn('#5ef0c8'), width: '100%', justifyContent: 'center' }}>
+                ▶ Start now
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {status === 'running' && (<>
+        <button onClick={doPause} style={iBtn('#ffb347')}>⏸ Pause</button>
+        <button onClick={doStop}  style={iBtn('#ff79c6')}>⏹ Stop</button>
+      </>)}
+
+      {status === 'paused' && (<>
+        <button onClick={doResume} style={iBtn('#5ef0c8')}>▶ Resume</button>
+        <button onClick={doStop}   style={iBtn('#ff79c6')}>⏹ Stop</button>
+      </>)}
+
+      {/* Today's accumulated timer — shown when idle */}
+      {status === 'idle' && todayTotal > 0 && (
+        <span style={{ fontSize: 11, color: 'rgba(232,234,246,0.35)', whiteSpace: 'nowrap' }}>
+          Today: {fmt(todayTotal)}
+        </span>
+      )}
+
+      {/* Running label */}
+      {status !== 'idle' && sessionRef.current?.label && (
+        <span style={{
+          fontSize: 11, color: 'rgba(232,234,246,0.4)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 120,
+        }}>
+          {sessionRef.current.label}
+        </span>
+      )}
+
+      <style>{`
+        @keyframes timerPulse {
+          0%,100% { opacity:1; transform:scale(1); }
+          50%      { opacity:0.3; transform:scale(1.6); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// tiny inline button style helper
+function iBtn(color) {
+  return {
+    padding: '5px 12px', borderRadius: 8, cursor: 'pointer',
+    border: `1px solid ${color}55`, background: `${color}18`,
+    color, fontSize: 12, fontWeight: 600, fontFamily: FF,
+    whiteSpace: 'nowrap', flexShrink: 0,
+  };
 }
 
 // ─── App Component ────────────────────────────────────────────────────────────
@@ -239,6 +436,7 @@ export default function App() {
     completed,
     topicData,
     logs,
+    timerSessions,
     todayHours,
     goals,
     activeTab,
@@ -277,21 +475,31 @@ export default function App() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', gap: 6, padding: '12px 20px', overflowX: 'auto' }}>
-        {tabs.map((t) => (
-          <button key={t} onClick={() => dispatch({ type: 'TAB', t })}
-            style={{
-              padding: '7px 16px', borderRadius: 20,
-              border: activeTab === t ? '1px solid rgba(124,111,224,0.6)' : '1px solid rgba(255,255,255,0.14)',
-              background: activeTab === t ? 'rgba(124,111,224,0.25)' : 'transparent',
-              color: activeTab === t ? '#c5beff' : 'rgba(232,234,246,0.55)',
-              fontSize: 13, cursor: 'pointer', fontFamily: FF, textTransform: 'capitalize',
-              whiteSpace: 'nowrap', fontWeight: activeTab === t ? 600 : 400
-            }}>
-            {t}
-          </button>
-        ))}
+      {/* Tabs + Inline Timer */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+
+        {/* Tab buttons */}
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto', flex: '0 0 auto' }}>
+          {tabs.map((t) => (
+            <button key={t} onClick={() => dispatch({ type: 'TAB', t })}
+              style={{
+                padding: '7px 16px', borderRadius: 20,
+                border: activeTab === t ? '1px solid rgba(124,111,224,0.6)' : '1px solid rgba(255,255,255,0.14)',
+                background: activeTab === t ? 'rgba(124,111,224,0.25)' : 'transparent',
+                color: activeTab === t ? '#c5beff' : 'rgba(232,234,246,0.55)',
+                fontSize: 13, cursor: 'pointer', fontFamily: FF, textTransform: 'capitalize',
+                whiteSpace: 'nowrap', fontWeight: activeTab === t ? 600 : 400
+              }}>
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {/* Divider */}
+        <div style={{ width: 1, height: 28, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }} />
+
+        {/* Compact inline timer */}
+        <InlineTimer dispatch={dispatch} timerSessions={timerSessions} />
       </div>
 
       <div style={{ padding: '12px 20px 28px' }}>
